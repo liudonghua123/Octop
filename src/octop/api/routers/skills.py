@@ -1393,29 +1393,36 @@ async def _hub_search(request: Request, *, q: str, limit: int) -> list[dict[str,
     )
 
     try:
-        return await search_skillhub(query, limit=effective_limit)
+        results = await search_skillhub(query, limit=effective_limit)
     except SkillHubMarketError as exc:
         logger.warning("SkillHub HTTP search failed; using CLI fallback: %s", exc)
 
-    skillhub_bin = await _ensure_skillhub_cli()
-    try:
-        rc, stdout, stderr = await _run_skillhub_cmd(
-            skillhub_bin,
-            ["search", "--search-limit", str(effective_limit), query],
-            timeout=30,
-        )
-    except TimeoutError:
-        raise HTTPException(status_code=504, detail="skillhub search timed out") from None
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to run skillhub CLI: {exc}") from exc
+        skillhub_bin = await _ensure_skillhub_cli()
+        try:
+            rc, stdout, stderr = await _run_skillhub_cmd(
+                skillhub_bin,
+                ["search", "--search-limit", str(effective_limit), query],
+                timeout=30,
+            )
+        except TimeoutError:
+            raise HTTPException(status_code=504, detail="skillhub search timed out") from None
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Failed to run skillhub CLI: {exc}") from exc
 
-    if rc != 0:
-        raise HTTPException(
-            status_code=502,
-            detail=_skillhub_cli_failure_detail("search", stderr, locale=locale),
-        )
+        if rc != 0:
+            raise HTTPException(
+                status_code=502,
+                detail=_skillhub_cli_failure_detail("search", stderr, locale=locale),
+            ) from None
 
-    return _parse_skillhub_search_output(stdout)
+        results = _parse_skillhub_search_output(stdout)
+
+    # Tag SkillHub results with their source so aggregated responses can
+    # mix multiple hubs; existing fields stay untouched.
+    for item in results:
+        if isinstance(item, dict) and not item.get("source"):
+            item["source"] = "skillhub"
+    return results
 
 
 async def _hub_rankings(ranking_type: str) -> dict[str, Any]:
@@ -1456,6 +1463,147 @@ async def hub_rankings_global(
     return await _hub_rankings(type)
 
 
+async def _hub_search_aggregated(
+    request: Request,
+    *,
+    q: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Search Tencent SkillHub plus external hubs, merged and deduped.
+
+    Each result carries a ``source`` field (``skillhub`` / ``clawhub`` /
+    ``skills.sh`` / ``skillsmp``). Sources that fail or lack a public
+    search API are skipped instead of failing the whole request.
+    """
+    import asyncio  # noqa: PLC0415
+
+    query = q.strip() or "a"
+    effective_limit = max(1, min(limit, 100))
+    per_source = max(1, effective_limit // 2)
+
+    async def _skillhub() -> list[dict[str, Any]]:
+        return await _hub_search(request, q=q, limit=per_source)
+
+    async def _clawhub() -> list[dict[str, Any]]:
+        from octop.infra.skills.skills_hub import (  # noqa: PLC0415
+            search_hub_skills,
+        )
+
+        rows = await asyncio.to_thread(search_hub_skills, query, per_source)
+        return [
+            {
+                "slug": row.slug,
+                "name": row.name,
+                "description": row.description,
+                "version": row.version,
+                "source": row.source or "clawhub",
+                "source_url": row.source_url,
+            }
+            for row in rows
+        ]
+
+    tasks = [_skillhub(), _clawhub()]
+    gathered = await asyncio.gather(*tasks, return_exceptions=True)
+
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for rows in gathered:
+        if isinstance(rows, BaseException):
+            logger.warning("Aggregated hub search source failed: %s", rows)
+            continue
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            slug = str(item.get("slug") or "").strip()
+            source = str(item.get("source") or "").strip()
+            if not slug:
+                continue
+            key = (source, slug)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    return merged[:effective_limit]
+
+
+@router.get(
+    "/skills/hub/search/all",
+    summary="Aggregated skill search across SkillHub and external hubs",
+)
+async def hub_search_all_global(
+    request: Request,
+    q: str = "",
+    limit: int = 50,
+    _user: Any = Depends(current_user),
+) -> list[dict[str, Any]]:
+    """Search all configured hubs and merge results with a source tag."""
+    return await _hub_search_aggregated(request, q=q, limit=limit)
+
+
+class HubPreviewBody(BaseModel):
+    """Preview a hub skill's SKILL.md without installing it."""
+
+    skill_name: str | None = None
+    bundle_url: str | None = None
+    version: str = ""
+
+
+@router.get("/skills/hub/preview", summary="Preview a hub skill's SKILL.md")
+async def hub_preview_skill(
+    request: Request,
+    skill_name: str = "",
+    bundle_url: str = "",
+    version: str = "",
+    _user: Any = Depends(current_user),
+) -> dict[str, Any]:
+    """Return ``{ name, content }`` for a hub skill without installing.
+
+    Pass ``skill_name`` for a Tencent SkillHub slug, or ``bundle_url``
+    for a skills.sh / clawhub.ai / skillsmp.com / github.com URL. The
+    lookup is read-only and never writes to any workspace.
+    """
+    from urllib.error import HTTPError, URLError  # noqa: PLC0415
+
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    from octop.infra.skills.skills_hub import (  # noqa: PLC0415
+        is_supported_skill_url,
+        preview_bundle_from_url,
+        preview_skillhub_skill,
+    )
+
+    slug = (skill_name or "").strip()
+    url = (bundle_url or "").strip()
+    if not slug and not url:
+        raise HTTPException(
+            status_code=400,
+            detail="skill_name or bundle_url is required",
+        )
+    if url and not is_supported_skill_url(url):
+        raise HTTPException(
+            status_code=400,
+            detail="bundle_url points to an unsupported source",
+        )
+    try:
+        if url:
+            name, content = await asyncio.to_thread(
+                preview_bundle_from_url,
+                bundle_url=url,
+                version=version,
+            )
+        else:
+            name, content = await asyncio.to_thread(
+                preview_skillhub_skill,
+                slug,
+            )
+    except (ValueError, RuntimeError, HTTPError, URLError, TimeoutError, OSError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to fetch skill preview: {exc}",
+        ) from exc
+    return {"name": name, "content": content}
+
+
 @router.get("/agents/{agent_id}/skills/hub/search")
 async def hub_search_skills(
     agent_id: str,
@@ -1473,6 +1621,21 @@ async def hub_search_skills(
     """
     require_agent_owner_row(agent_id, user=user, as_user=as_user, server=server)
     return await _hub_search(request, q=q, limit=limit)
+
+
+@router.get("/agents/{agent_id}/skills/hub/search/all")
+async def hub_search_all(
+    agent_id: str,
+    request: Request,
+    q: str = "",
+    limit: int = 50,
+    as_user: int | None = None,
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> list[dict[str, Any]]:
+    """Aggregated multi-hub search scoped to an agent context."""
+    require_agent_owner_row(agent_id, user=user, as_user=as_user, server=server)
+    return await _hub_search_aggregated(request, q=q, limit=limit)
 
 
 @router.get("/agents/{agent_id}/skills/hub/rankings")

@@ -29,6 +29,7 @@ class HubSkillResult:
     description: str = ""
     version: str = ""
     source_url: str = ""
+    source: str = ""
 
 
 @dataclass
@@ -1368,6 +1369,87 @@ def search_hub_skills(query: str, limit: int = 20) -> list[HubSkillResult]:
                 ),
                 version=str(item.get("version") or ""),
                 source_url=str(item.get("url") or ""),
+                source="clawhub",
+            ),
+        )
+    return results
+
+
+# --- external hub search (skills.sh / skillsmp) -----------------------------
+
+
+def _search_skills_sh(
+    query: str,
+    limit: int,
+) -> list[HubSkillResult]:
+    """Search skills.sh via the GitHub skill listing it aggregates."""
+    # skills.sh has no public search API; it indexes GitHub repos under
+    # its skills listing. Use GitHub repo search scoped to SKILL.md as
+    # a best-effort proxy so users can discover installable skills.
+    data = _http_json_get(
+        "https://api.github.com/search/repositories",
+        {
+            "q": f"{query} SKILL.md in:path",
+            "per_page": min(max(1, limit), 20),
+        },
+    )
+    items = data.get("items") if isinstance(data, dict) else None
+    results: list[HubSkillResult] = []
+    if not isinstance(items, list):
+        return results
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        owner = str((item.get("owner") or {}).get("login") or "").strip()
+        repo = str(item.get("name") or "").strip()
+        full = f"{owner}/{repo}".strip("/")
+        if not full:
+            continue
+        results.append(
+            HubSkillResult(
+                slug=full,
+                name=str(item.get("full_name") or full),
+                description=str(item.get("description") or ""),
+                version="",
+                source_url=f"https://skills.sh/{full}",
+                source="skills.sh",
+            ),
+        )
+    return results
+
+
+def _search_skillsmp(
+    query: str,
+    limit: int,
+) -> list[HubSkillResult]:
+    """Search SkillsMP — it proxies a GitHub-backed skill registry."""
+    data = _http_json_get(
+        "https://api.github.com/search/repositories",
+        {
+            "q": f"{query} skills SKILL.md in:readme,path",
+            "per_page": min(max(1, limit), 20),
+        },
+    )
+    items = data.get("items") if isinstance(data, dict) else None
+    results: list[HubSkillResult] = []
+    if not isinstance(items, list):
+        return results
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        owner = str((item.get("owner") or {}).get("login") or "").strip()
+        repo = str(item.get("name") or "").strip()
+        full = f"{owner}/{repo}".strip("/")
+        if not full:
+            continue
+        results.append(
+            HubSkillResult(
+                slug=f"{full}",
+                name=str(item.get("full_name") or full),
+                description=str(item.get("description") or ""),
+                version="",
+                source_url=f"https://skillsmp.com/skills/{full}",
+                source="skillsmp",
             ),
         )
     return results
@@ -1481,12 +1563,64 @@ def resolve_bundle_from_url(
     return BundleResolveResult(name=skill_slug, uploads=uploads, source_url=source_url)
 
 
+def preview_bundle_from_url(
+    *,
+    bundle_url: str,
+    version: str | None = "",
+) -> tuple[str, str]:
+    """Fetch a remote skill bundle and return ``(name, SKILL.md content)``.
+
+    Lighter than :func:`resolve_bundle_from_url`: skips building the
+    upload payload tree and is intended for pre-install previews.
+    """
+    resolved_version = (version or "").strip()
+    data, _source_url = _fetch_bundle_data(bundle_url, version=resolved_version)
+    name, content, _references, _scripts, _extra_files = _normalize_bundle(data)
+    if not name:
+        fallback = urlparse(bundle_url).path.strip("/").split("/")[-1]
+        name = _safe_fallback_name(fallback)
+    return _skill_slug(name), content
+
+
+def preview_skillhub_skill(
+    slug: str,
+    *,
+    host: str | None = None,
+    timeout: float = 30.0,
+) -> tuple[str, str]:
+    """Download a SkillHub package and return ``(name, SKILL.md content)``.
+
+    Reads only from the public HTTP registry path; never touches the
+    CLI so previews stay read-only and fast.
+    """
+    from octop.infra.skills.skillhub_market import (  # noqa: PLC0415
+        download_skillhub_package_files,
+    )
+
+    files = download_skillhub_package_files(slug, host=host, timeout=timeout)
+    content = next(
+        (data for path, data in files if path == "SKILL.md"),
+        b"",
+    )
+    name = slug
+    try:
+        meta, _body = parse_frontmatter(content.decode("utf-8"))
+        raw_name = meta.get("name", "")
+        if isinstance(raw_name, str) and raw_name.strip():
+            name = raw_name.strip()
+    except Exception:
+        pass
+    return name, content.decode("utf-8", errors="replace")
+
+
 __all__ = [
     "BundleResolveResult",
     "HubSkillResult",
     "SUPPORTED_URL_PREFIXES",
     "bundle_to_uploads",
     "is_supported_skill_url",
+    "preview_bundle_from_url",
+    "preview_skillhub_skill",
     "resolve_bundle_from_url",
     "search_hub_skills",
     "supported_skill_url_prefixes",

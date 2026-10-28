@@ -1,15 +1,20 @@
 // dashboard/src/pages/Agent/Skills/components/SkillHubDetailDrawer.tsx
-import type { ReactNode } from "react";
-import { Drawer, Button, Tag, Empty } from "antd";
+import { useEffect, useState, type ReactNode } from "react";
+import { Drawer, Button, Tag, Empty, Spin } from "antd";
 import {
   CircleCheck,
   Download,
+  Eye,
   LayoutGrid,
   RefreshCw,
   Star,
   Zap,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { request } from "../../../../api/request";
+import { apiErrorMessage } from "../../../../utils/apiError";
+import { skillHubPreviewPath } from "./skillInstallTarget";
+import Markdown from "../../../../components/Markdown/LazyMarkdown";
 
 export interface SkillHubSkill {
   slug: string;
@@ -24,6 +29,7 @@ export interface SkillHubSkill {
   verified?: boolean;
   iconUrl?: string | null;
   category?: string;
+  source?: string;
   labels?: Record<string, unknown> | null;
 }
 
@@ -104,6 +110,122 @@ function FieldLabel({ children }: { children: ReactNode }) {
       }}
     >
       {children}
+    </div>
+  );
+}
+
+/** Preview target for a hub skill: SkillHub slug or external bundle URL. */
+function previewParams(skill: SkillHubSkill): {
+  skillName?: string;
+  bundleUrl?: string;
+} {
+  const raw = skill as SkillHubSkill & { source_url?: string };
+  const source = String(skill.source ?? "");
+  const bundleUrl = String(raw.source_url ?? "");
+  if (source && source !== "skillhub" && bundleUrl) {
+    return { bundleUrl };
+  }
+  return { skillName: skill.slug };
+}
+
+function SkillPreview({ skill }: { skill: SkillHubSkill }) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const [content, setContent] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!expanded || content !== null) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    request<{ name: string; content: string }>(
+      skillHubPreviewPath(previewParams(skill)),
+    )
+      .then((payload) => {
+        if (!cancelled) setContent(payload?.content ?? "");
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(
+            apiErrorMessage(
+              err,
+              t("skills.previewFailed", "Failed to load preview"),
+              t,
+            ),
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [expanded, content, skill, t]);
+
+  if (!expanded) {
+    return (
+      <Button
+        size="small"
+        icon={<Eye size={14} />}
+        onClick={() => setExpanded(true)}
+      >
+        {t("skills.viewSkillContent", "View SKILL.md")}
+      </Button>
+    );
+  }
+
+  return (
+    <div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 10,
+          gap: 8,
+        }}
+      >
+        <FieldLabel>SKILL.md</FieldLabel>
+        <Button
+          size="small"
+          type="text"
+          icon={<Eye size={14} />}
+          onClick={() => setExpanded(false)}
+          style={{ color: "var(--fn-text-tertiary)" }}
+        >
+          {t("common.collapse", "Collapse")}
+        </Button>
+      </div>
+      {loading ? (
+        <div style={{ textAlign: "center", padding: "24px 0" }}>
+          <Spin size="small" />
+        </div>
+      ) : error ? (
+        <div style={{ color: "var(--fn-color-danger, #ff4d4f)", fontSize: 13 }}>
+          {error}
+        </div>
+      ) : content ? (
+        <div
+          style={{
+            maxHeight: 420,
+            overflow: "auto",
+            padding: "12px 16px",
+            background: "var(--fn-bg-tertiary)",
+            borderRadius: 8,
+            fontSize: 13,
+          }}
+        >
+          <Markdown content={content} />
+        </div>
+      ) : (
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description={t("skills.noPreview", "No SKILL.md content")}
+        />
+      )}
     </div>
   );
 }
@@ -211,7 +333,7 @@ export function SkillHubDetailDrawer({
       }
     >
       <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
-        {/* Tags row: version + status + api-key + category */}
+        {/* Tags row: version + status + api-key + category + source */}
         <div
           style={{
             display: "flex",
@@ -228,6 +350,11 @@ export function SkillHubDetailDrawer({
             <Tag color="orange">{t("skills.requiresApiKey")}</Tag>
           )}
           {skill.category && <Tag bordered={false}>{skill.category}</Tag>}
+          {skill.source && (
+            <Tag bordered={false} style={{ background: "var(--fn-bg-tertiary)" }}>
+              {skill.source}
+            </Tag>
+          )}
         </div>
 
         {/* Stats card */}
@@ -285,6 +412,9 @@ export function SkillHubDetailDrawer({
             />
           )}
         </div>
+
+        {/* Pre-install SKILL.md preview */}
+        <SkillPreview skill={skill} />
 
         {/* Slug */}
         <div>

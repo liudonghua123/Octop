@@ -409,9 +409,29 @@ async def package_hub_search(
     query = q.strip() or "a"
     effective_limit = max(1, min(limit, 100))
     try:
-        return await search_skillhub(query, limit=effective_limit)
+        results = await search_skillhub(query, limit=effective_limit)
     except SkillHubMarketError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    for item in results:
+        if isinstance(item, dict) and not item.get("source"):
+            item["source"] = "skillhub"
+    return results
+
+
+@router.get(
+    "/hub/search/all",
+    summary="Aggregated skill search across SkillHub and external hubs",
+)
+async def package_hub_search_all(
+    request: Request,
+    q: str = "",
+    limit: int = 50,
+    _user: User = Depends(require_permission("skill_packages")),
+) -> list[dict[str, Any]]:
+    """Search all configured hubs and merge results with a source tag."""
+    from octop.api.routers.skills import _hub_search_aggregated  # noqa: PLC0415
+
+    return await _hub_search_aggregated(request, q=q, limit=limit)
 
 
 @router.get("/hub/rankings", summary="SkillHub rankings for installing into packages")

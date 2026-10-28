@@ -13,7 +13,7 @@ import { loadRankingsCache, saveRankingsCache } from "./skillHubCache";
 import {
   skillHubInstallPath,
   skillHubRankingsPath,
-  skillHubSearchPath,
+  skillHubSearchAllPath,
   skillListPath,
   type SkillInstallTarget,
 } from "./skillInstallTarget";
@@ -98,6 +98,20 @@ function normalizeHubSkill(raw: Record<string, unknown>): SkillHubSkill {
       (raw.icon_url as string | null | undefined) ??
       null,
   };
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  skillhub: "SkillHub",
+  clawhub: "ClawHub",
+  "skills.sh": "skills.sh",
+  skillsmp: "SkillsMP",
+};
+
+function sourceLabel(skill: SkillHubSkill): string {
+  const source = String(
+    (skill as SkillHubSkill & { source?: string }).source ?? "",
+  );
+  return SOURCE_LABELS[source] ?? "";
 }
 
 export default function SkillHubTab({
@@ -208,7 +222,7 @@ export default function SkillHubTab({
       setLoadError(null);
       try {
         const results = await request<Record<string, unknown>[]>(
-          skillHubSearchPath(browseTarget, query),
+          skillHubSearchAllPath(browseTarget, query),
           { signal: controller.signal },
         );
         if (!controller.signal.aborted) {
@@ -442,6 +456,21 @@ export default function SkillHubTab({
                   </span>
                 )}
                 <span className={styles.hubCardName}>{skill.name}</span>
+                {sourceLabel(skill) && (
+                  <Tag
+                    bordered={false}
+                    style={{
+                      fontSize: 11,
+                      lineHeight: "18px",
+                      padding: "0 6px",
+                      margin: 0,
+                      flexShrink: 0,
+                      color: "var(--fn-text-tertiary)",
+                    }}
+                  >
+                    {sourceLabel(skill)}
+                  </Tag>
+                )}
                 {skill.verified && (
                   <CircleCheck
                     size={14}

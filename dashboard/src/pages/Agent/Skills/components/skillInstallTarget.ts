@@ -30,6 +30,31 @@ export function skillHubSearchPath(
   return `/skill-packages/hub/search?q=${q}&limit=${limit}`;
 }
 
+export function skillHubSearchAllPath(
+  target: SkillInstallTarget,
+  query: string,
+  limit = 50,
+): string {
+  const q = encodeURIComponent(query);
+  if (target.type === "browse") {
+    return `/skills/hub/search/all?q=${q}&limit=${limit}`;
+  }
+  if (target.type === "agent") {
+    return `/agents/${target.agentId}/skills/hub/search/all?q=${q}&limit=${limit}`;
+  }
+  return `/skill-packages/hub/search/all?q=${q}&limit=${limit}`;
+}
+
+export function skillHubPreviewPath(params: {
+  skillName?: string;
+  bundleUrl?: string;
+}): string {
+  const qs = new URLSearchParams();
+  if (params.skillName) qs.set("skill_name", params.skillName);
+  if (params.bundleUrl) qs.set("bundle_url", params.bundleUrl);
+  return `/skills/hub/preview?${qs.toString()}`;
+}
+
 export function skillHubInstallPath(target: SkillInstallTarget): string {
   if (target.type === "browse") {
     throw new Error("SkillHub browse target cannot install");
