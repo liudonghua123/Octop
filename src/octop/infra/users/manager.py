@@ -654,6 +654,23 @@ class UserManager:
             if current is not None:
                 current.display_name = display_name
 
+    async def set_display_name_for_user(self, user: User, display_name: str | None) -> None:
+        """Update display name for an already-authenticated user.
+
+        Keys off ``user.id`` instead of re-resolving by username, so a
+        stale in-memory/DB mismatch surfaces as an auth error (the token
+        points at a user that no longer exists) rather than a confusing
+        404 on a self-service endpoint.
+        """
+        row = self._services.user_repo.get(user.id)
+        if row is None:
+            raise OctopError(ErrorCode.AUTH_FAILED, "user not active")
+        self._services.user_repo.set_display_name(row.id, display_name)
+        async with self._lock:
+            current = self._users.get(user.username)
+            if current is not None:
+                current.display_name = display_name
+
     async def set_email(self, username: str, email: str | None) -> None:
         row = self._services.user_repo.get_by_username(username)
         if row is None:
@@ -692,6 +709,24 @@ class UserManager:
             if current is not None:
                 current.locale = loc
 
+    async def set_locale_for_user(self, user: User, locale: str) -> None:
+        """Update locale for an already-authenticated user.
+
+        Keys off ``user.id`` instead of re-resolving by username. When the
+        row is gone (DB reset/restore, SSO sync, multi-instance drift) the
+        session is dead: raising AUTH_FAILED (401) lets the dashboard
+        redirect to login instead of surfacing a misleading 404 on save.
+        """
+        row = self._services.user_repo.get(user.id)
+        if row is None:
+            raise OctopError(ErrorCode.AUTH_FAILED, "user not active")
+        loc = normalize_locale(locale)
+        self._services.user_repo.set_locale(row.id, loc)
+        async with self._lock:
+            current = self._users.get(user.username)
+            if current is not None:
+                current.locale = loc
+
     def get_remote_browser_bookmarks(self, user_id: int) -> builtins.list[RemoteBrowserBookmark]:
         row = self._services.user_repo.get(user_id)
         if row is None:
@@ -711,6 +746,20 @@ class UserManager:
         self._services.user_repo.set_preferences_json(row.id, merged)
         return bookmarks
 
+    async def set_remote_browser_bookmarks_for_user(
+        self,
+        user: User,
+        items: builtins.list[dict[str, str]],
+    ) -> builtins.list[RemoteBrowserBookmark]:
+        """Bookmark setter keyed off the authenticated user's id (see set_locale_for_user)."""
+        row = self._services.user_repo.get(user.id)
+        if row is None:
+            raise OctopError(ErrorCode.AUTH_FAILED, "user not active")
+        bookmarks = validate_remote_browser_bookmarks(items)
+        merged = merge_preferences_json(row.preferences_json, bookmarks)
+        self._services.user_repo.set_preferences_json(row.id, merged)
+        return bookmarks
+
     async def set_model_preferences(
         self,
         username: str,
@@ -721,6 +770,24 @@ class UserManager:
         row = self._services.user_repo.get_by_username(username)
         if row is None:
             raise OctopError(ErrorCode.NOT_FOUND, "user not found")
+        merged = merge_model_preferences_json(
+            row.preferences_json,
+            preferred_model=preferred_model,
+            model_reasoning=model_reasoning,
+        )
+        self._services.user_repo.set_preferences_json(row.id, merged)
+
+    async def set_model_preferences_for_user(
+        self,
+        user: User,
+        *,
+        preferred_model: str | None | object = ...,
+        model_reasoning: dict[str, ModelReasoningPreference] | None = None,
+    ) -> None:
+        """Model-preference setter keyed off the authenticated user's id (see set_locale_for_user)."""
+        row = self._services.user_repo.get(user.id)
+        if row is None:
+            raise OctopError(ErrorCode.AUTH_FAILED, "user not active")
         merged = merge_model_preferences_json(
             row.preferences_json,
             preferred_model=preferred_model,

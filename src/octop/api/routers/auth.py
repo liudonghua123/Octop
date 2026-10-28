@@ -253,9 +253,9 @@ async def update_me(
     """
     provided = body.model_dump(exclude_unset=True)
     if "display_name" in provided:
-        await server.user_manager.set_display_name(user.username, body.display_name)
+        await server.user_manager.set_display_name_for_user(user, body.display_name)
     if "locale" in provided:
-        await server.user_manager.set_locale(user.username, body.locale)
+        await server.user_manager.set_locale_for_user(user, body.locale)
     if "avatar_icon" in provided:
         from octop.infra.users.profile_avatar import clean_avatar_icon, delete_profile_avatar
 

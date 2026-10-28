@@ -159,11 +159,13 @@ async def patch_preferences(
     user: Any = Depends(current_user),
     server: Any = Depends(get_server),
 ) -> PreferencesResponse:
+    # Self-service setters key off user.id: an authenticated token whose row
+    # is gone means a dead session (401 → re-login), not a 404.
     if body.locale is not None:
-        await server.user_manager.set_locale(user.username, body.locale)
+        await server.user_manager.set_locale_for_user(user, body.locale)
     if body.remote_browser_bookmarks is not None:
         items = [b.model_dump() for b in body.remote_browser_bookmarks]
-        await server.user_manager.set_remote_browser_bookmarks(user.username, items)
+        await server.user_manager.set_remote_browser_bookmarks_for_user(user, items)
     if "preferred_model" in body.model_fields_set or body.model_reasoning is not None:
         preferred: str | None | object = ...
         if "preferred_model" in body.model_fields_set:
@@ -193,8 +195,8 @@ async def patch_preferences(
                 ref: ModelReasoningPreference(mode=value.mode, effort=value.effort)
                 for ref, value in body.model_reasoning.items()
             }
-        await server.user_manager.set_model_preferences(
-            user.username,
+        await server.user_manager.set_model_preferences_for_user(
+            user,
             preferred_model=preferred,
             model_reasoning=reasoning,
         )

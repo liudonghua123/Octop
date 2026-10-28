@@ -116,3 +116,25 @@ async def test_preferences_sidebar_nav_roundtrip(env) -> None:
     r = await client.patch("/api/preferences", headers=auth, json={"sidebar_nav": None})
     assert r.status_code == 200
     assert r.json()["sidebar_nav"] is None
+
+
+@pytest.mark.asyncio
+async def test_preferences_locale_with_stale_session_returns_401(env) -> None:
+    """A token whose user row is gone is a dead session: 401, not 404.
+
+    Regression: set_locale looked the user up by username and raised
+    NOT_FOUND when the row was missing, so saving the UI language came
+    back as a confusing 404 while reads still worked.
+    """
+    client, srv, auth = env
+    # Simulate DB drift (reset/restore/SSO sync): drop the row behind the
+    # token. Recreate a placeholder row first so the setup-lockdown
+    # middleware (which counts users) doesn't 503 the request.
+    row = srv.services.user_repo.get_by_username("admin")
+    assert row is not None
+    srv.services.user_repo.delete(row.id)
+    srv.services.user_repo.create(username="placeholder", password_hash="x", role="user")
+
+    r = await client.patch("/api/preferences", headers=auth, json={"locale": "en"})
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "AUTH_FAILED"
