@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from octop.config import DEFAULT_MAX_UPLOAD_MB, upload_mb_to_bytes
 from octop.infra.db.repos.knowledge import KnowledgeBaseRow, KnowledgeDocumentRow
+from octop.infra.knowledge.embed import embed_knowledge_texts
 from octop.infra.knowledge.files import (
     delete_document_file,
     delete_knowledge_base_files,
@@ -362,6 +363,12 @@ class KnowledgeService:
             return base
         raise PermissionError("knowledge base owner access is required")
 
+    def _get_document_or_raise(self, kb_id: str, doc_id: str) -> KnowledgeDocumentRow:
+        document = self._repo.get_document(doc_id)
+        if document is None or document.kb_id != kb_id:
+            raise LookupError("knowledge document not found")
+        return document
+
     def upload_document(
         self,
         kb_id: str,
@@ -421,6 +428,140 @@ class KnowledgeService:
                 continue
             KnowledgeIndex(kb_id).delete_doc(row.id)
             delete_document_file(kb_id, row.id, row.filename)
+
+    def get_document_chunks(
+        self, kb_id: str, doc_id: str, *, actor_user_id: int, is_admin: bool = False
+    ) -> dict[str, Any]:
+        """Return the stored index chunks of one document, in order."""
+        self.get_readable_base(kb_id, actor_user_id=actor_user_id, is_admin=is_admin)
+        document = self._get_document_or_raise(kb_id, doc_id)
+        if document.is_dir:
+            raise LookupError("knowledge document not found")
+        chunks = KnowledgeIndex(kb_id).list_doc_chunks(doc_id)
+        return {
+            "id": document.id,
+            "filename": document.filename,
+            "status": document.status,
+            "chunk_count": len(chunks),
+            "chunks": [
+                {
+                    "ordinal": chunk.ordinal,
+                    "text": chunk.text,
+                    "metadata": chunk.metadata,
+                }
+                for chunk in chunks
+            ],
+        }
+
+    def set_document_chunks(
+        self,
+        kb_id: str,
+        doc_id: str,
+        chunks: list[str],
+        *,
+        actor_user_id: int,
+        is_admin: bool = False,
+    ) -> KnowledgeDocumentRow:
+        """Replace a document's chunks with manually adjusted ones.
+
+        Re-embeds the provided chunk texts and atomically swaps the index
+        rows, mirroring what automatic indexing does — without re-parsing
+        the original file.
+        """
+        assert_knowledge_usable(
+            self._services.settings_repo.get,
+            getattr(self._services, "provider_repo", None),
+        )
+        self.get_writable_base(kb_id, actor_user_id=actor_user_id, is_admin=is_admin)
+        document = self._get_document_or_raise(kb_id, doc_id)
+        if document.is_dir:
+            raise ValueError("folders cannot have chunks")
+        texts = [str(chunk).strip() for chunk in chunks]
+        if any(not text for text in texts):
+            raise ValueError("knowledge chunks must be non-empty")
+        if not texts:
+            raise ValueError("knowledge document needs at least one chunk")
+        embeddings = embed_knowledge_texts(self._services, texts)
+        KnowledgeIndex(kb_id).replace_doc_chunks(doc_id, texts, embeddings)
+        self._repo.update_document(doc_id, status="ready", error_message="", chunk_count=len(texts))
+        refreshed = self._repo.get_document(doc_id)
+        if refreshed is None:
+            raise LookupError("knowledge document not found")
+        return refreshed
+
+    def test_retrieval(
+        self,
+        kb_ids: list[str],
+        query: str,
+        *,
+        actor_user_id: int,
+        is_admin: bool = False,
+        k: int | None = None,
+    ) -> dict[str, Any]:
+        """Run a retrieval query against selected bases and rank the hits.
+
+        Mirrors what a chat turn sees: embed the query, search each
+        readable base's index, then merge and sort by score. Returns the
+        ranked chunks plus per-base coverage so the caller can tell which
+        bases contributed nothing.
+        """
+        from octop.infra.knowledge.params import DEFAULT_RETRIEVAL_K
+
+        assert_knowledge_usable(
+            self._services.settings_repo.get,
+            getattr(self._services, "provider_repo", None),
+        )
+        trimmed = (query or "").strip()
+        if not trimmed:
+            raise ValueError("retrieval test query must not be empty")
+        top_k = DEFAULT_RETRIEVAL_K if k is None else max(1, min(int(k), DEFAULT_RETRIEVAL_K * 5))
+        # De-duplicate while preserving caller order.
+        selected_ids = list(dict.fromkeys(kb_id for kb_id in kb_ids if kb_id))
+        if not selected_ids:
+            raise ValueError("retrieval test requires at least one knowledge base")
+        for kb_id in selected_ids:
+            self.get_readable_base(kb_id, actor_user_id=actor_user_id, is_admin=is_admin)
+
+        query_vectors = embed_knowledge_texts(self._services, [trimmed])
+        if not query_vectors:
+            raise RuntimeError("failed to embed retrieval test query")
+        query_vector = query_vectors[0]
+
+        hits: list[dict[str, Any]] = []
+        base_coverage: dict[str, int] = dict.fromkeys(selected_ids, 0)
+        for kb_id in selected_ids:
+            base = self._repo.get_base(kb_id)
+            if base is None:
+                continue
+            ready_documents = {
+                document.id: document
+                for document in self._repo.list_documents(kb_id)
+                if document.status == "ready" and not document.is_dir
+            }
+            for hit in KnowledgeIndex(kb_id).search(query_vector, k=top_k):
+                document = ready_documents.get(hit.doc_id)
+                if document is None:
+                    continue
+                base_coverage[kb_id] += 1
+                hits.append(
+                    {
+                        "kb_id": kb_id,
+                        "kb_name": base.name,
+                        "doc_id": document.id,
+                        "filename": document.filename,
+                        "path": document.path,
+                        "ordinal": hit.ordinal,
+                        "score": round(hit.score, 6),
+                        "text": hit.text,
+                    }
+                )
+        hits.sort(key=lambda item: item["score"], reverse=True)
+        return {
+            "query": trimmed,
+            "k": top_k,
+            "hits": hits[:top_k],
+            "base_coverage": base_coverage,
+        }
 
     def reindex_document(
         self, kb_id: str, doc_id: str, *, actor_user_id: int, is_admin: bool = False

@@ -146,6 +146,28 @@ class RenameDocumentBody(BaseModel):
     new_name: str = Field(min_length=1, max_length=255, description="New document or folder name.")
 
 
+class UpdateDocumentChunksBody(BaseModel):
+    chunks: list[str] = Field(
+        min_length=1,
+        description="Replacement chunk texts, in order. Replaces all stored chunks.",
+    )
+
+
+class RetrievalTestBody(BaseModel):
+    query: str = Field(min_length=1, max_length=4000, description="Test query text.")
+    kb_ids: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Additional knowledge-base IDs to search alongside the path base.",
+    )
+    k: int | None = Field(
+        default=None,
+        ge=1,
+        le=100,
+        description="Max hits to return. Defaults to the instance retrieval_k setting.",
+    )
+
+
 def _knowledge_service(server: OctopServer) -> KnowledgeService:
     if server.services is None:
         raise OctopError(ErrorCode.INTERNAL_ERROR, "knowledge services are not initialized")
@@ -1100,6 +1122,84 @@ async def reindex_document(
         assert server.services is not None
         enqueue_index_document(server.services, kb_id, doc_id)
         return _row_payload(document)
+    except Exception as exc:
+        raise _map_knowledge_error(
+            exc, locale=resolve_request_locale(request), server=server
+        ) from exc
+
+
+@router.get(
+    "/{kb_id}/documents/{doc_id}/chunks",
+    summary="View the indexed chunks of a knowledge document",
+)
+async def get_document_chunks(
+    kb_id: str,
+    doc_id: str,
+    request: Request,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(require_permission("knowledge_bases")),
+) -> dict[str, Any]:
+    try:
+        _require_usable(server, request)
+        return _knowledge_service(server).get_document_chunks(
+            kb_id, doc_id, actor_user_id=user.id, is_admin=_is_admin(user)
+        )
+    except Exception as exc:
+        raise _map_knowledge_error(
+            exc, locale=resolve_request_locale(request), server=server
+        ) from exc
+
+
+@router.put(
+    "/{kb_id}/documents/{doc_id}/chunks",
+    summary="Replace a document's chunks with manually adjusted ones",
+)
+async def put_document_chunks(
+    kb_id: str,
+    doc_id: str,
+    body: UpdateDocumentChunksBody,
+    request: Request,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(require_permission("knowledge_bases")),
+) -> dict[str, Any]:
+    try:
+        _require_usable(server, request)
+        document = _knowledge_service(server).set_document_chunks(
+            kb_id,
+            doc_id,
+            body.chunks,
+            actor_user_id=user.id,
+            is_admin=_is_admin(user),
+        )
+        return _row_payload(document)
+    except Exception as exc:
+        raise _map_knowledge_error(
+            exc, locale=resolve_request_locale(request), server=server
+        ) from exc
+
+
+@router.post(
+    "/{kb_id}/retrieval-test",
+    summary="Test retrieval against one or more knowledge bases",
+)
+async def retrieval_test(
+    kb_id: str,
+    body: RetrievalTestBody,
+    request: Request,
+    server: OctopServer = Depends(get_server),
+    user: User = Depends(require_permission("knowledge_bases")),
+) -> dict[str, Any]:
+    """Preview exactly which chunks a chat turn would retrieve."""
+    try:
+        _require_usable(server, request)
+        kb_ids = [kb_id, *(other or "" for other in body.kb_ids)]
+        return _knowledge_service(server).test_retrieval(
+            kb_ids,
+            body.query,
+            actor_user_id=user.id,
+            is_admin=_is_admin(user),
+            k=body.k,
+        )
     except Exception as exc:
         raise _map_knowledge_error(
             exc, locale=resolve_request_locale(request), server=server

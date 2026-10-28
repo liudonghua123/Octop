@@ -347,4 +347,52 @@ export const knowledgeBasesApi = {
         body: JSON.stringify({ new_name: newName }),
       },
     ),
+
+  /** View the indexed chunks of one document, in ordinal order. */
+  getDocumentChunks: (id: string, documentId: string) =>
+    request<{
+      id: string;
+      filename: string;
+      status: string;
+      chunk_count: number;
+      chunks: {
+        ordinal: number;
+        text: string;
+        metadata: Record<string, unknown>;
+      }[];
+    }>(`/knowledge-bases/${id}/documents/${documentId}/chunks`),
+
+  /** Replace a document's chunks with manually adjusted ones (re-embeds). */
+  setDocumentChunks: (id: string, documentId: string, chunks: string[]) =>
+    request<KnowledgeDocument>(
+      `/knowledge-bases/${id}/documents/${documentId}/chunks`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ chunks }),
+      },
+    ),
+
+  /** Retrieval test: preview which chunks a chat turn would retrieve. */
+  retrievalTest: (
+    id: string,
+    body: { query: string; kb_ids?: string[]; k?: number },
+  ) =>
+    request<{
+      query: string;
+      k: number;
+      hits: {
+        kb_id: string;
+        kb_name: string;
+        doc_id: string;
+        filename: string;
+        path: string;
+        ordinal: number;
+        score: number;
+        text: string;
+      }[];
+      base_coverage: Record<string, number>;
+    }>(`/knowledge-bases/${id}/retrieval-test`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 };

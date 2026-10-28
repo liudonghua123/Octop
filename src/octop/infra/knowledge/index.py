@@ -95,6 +95,29 @@ class KnowledgeIndex:
         with self._connect() as conn:
             conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
 
+    def list_doc_chunks(self, doc_id: str) -> list[Hit]:
+        """Return every stored chunk of one document, in ordinal order."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT chunk_id, doc_id, ordinal, text, embedding, meta_json "
+                "FROM chunks WHERE doc_id = ? ORDER BY ordinal",
+                (doc_id,),
+            ).fetchall()
+        hits: list[Hit] = []
+        for chunk_id, row_doc_id, ordinal, text, _blob, meta_json in rows:
+            decoded = json.loads(meta_json)
+            hits.append(
+                Hit(
+                    chunk_id=chunk_id,
+                    doc_id=row_doc_id,
+                    ordinal=ordinal,
+                    text=text,
+                    score=0.0,
+                    metadata=decoded if isinstance(decoded, dict) else {},
+                )
+            )
+        return hits
+
     def search(self, query_vec: Sequence[float], k: int) -> list[Hit]:
         """Return the ``k`` best chunk hits using in-process cosine similarity."""
         if k <= 0:

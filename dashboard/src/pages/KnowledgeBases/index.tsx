@@ -51,6 +51,8 @@ import {
   LayoutGrid,
   List as ListIcon,
   ListTree,
+  Scissors,
+  FlaskConical,
   Maximize2,
   MessageSquarePlus,
   Minimize2,
@@ -90,6 +92,8 @@ import DocumentPreviewCore from "../../components/DocumentPreviewCore";
 import DocumentPreviewLoading from "../../components/DocumentPreviewLoading";
 import Markdown from "../../components/Markdown";
 import StreamSetupGuide from "../../components/StreamSetupGuide/StreamSetupGuide";
+import DocumentChunksModal from "./DocumentChunksModal";
+import RetrievalTestModal from "./RetrievalTestModal";
 import { CopyableResourceId } from "../../components/CopyableResourceId";
 import { ResourceVisibilityFields } from "../../components/ResourceVisibilityFields";
 import { TextAssistBar } from "../../components/TextAssistBar";
@@ -364,6 +368,11 @@ export default function KnowledgeBasesPage() {
   const [previewHasOriginal, setPreviewHasOriginal] = useState(false);
   const [previewAsMarkdown, setPreviewAsMarkdown] = useState(false);
   const [previewMaximized, setPreviewMaximized] = useState(false);
+  const [chunksTarget, setChunksTarget] = useState<{
+    id: string;
+    filename: string;
+  } | null>(null);
+  const [retrievalTestOpen, setRetrievalTestOpen] = useState(false);
   const [mdOutlineOpen, setMdOutlineOpen] = useState(true);
   const [mdActiveOutlineIndex, setMdActiveOutlineIndex] = useState(0);
   const [mdFindOpen, setMdFindOpen] = useState(false);
@@ -1921,19 +1930,36 @@ export default function KnowledgeBasesPage() {
               </Tooltip>
             ) : null}
             {document.is_dir ? null : (
-              <Popconfirm
-                title={t("knowledgeBases.rebuildDocumentConfirm")}
-                onConfirm={() => void rebuildDocument(document.id)}
-              >
-                <Tooltip title={t("knowledgeBases.rebuildDocument")}>
+              <>
+                <Tooltip title="View / adjust chunks">
                   <Button
                     type="text"
                     size="small"
-                    icon={<RefreshCw size={14} />}
-                    aria-label={t("knowledgeBases.rebuildDocument")}
+                    icon={<Scissors size={14} />}
+                    aria-label="View / adjust chunks"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setChunksTarget({
+                        id: document.id,
+                        filename: document.filename,
+                      });
+                    }}
                   />
                 </Tooltip>
-              </Popconfirm>
+                <Popconfirm
+                  title={t("knowledgeBases.rebuildDocumentConfirm")}
+                  onConfirm={() => void rebuildDocument(document.id)}
+                >
+                  <Tooltip title={t("knowledgeBases.rebuildDocument")}>
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<RefreshCw size={14} />}
+                      aria-label={t("knowledgeBases.rebuildDocument")}
+                    />
+                  </Tooltip>
+                </Popconfirm>
+              </>
             )}
             {document.is_dir ? (
               <Tooltip title={t("knowledgeBases.renameFolder")}>
@@ -1992,12 +2018,38 @@ export default function KnowledgeBasesPage() {
       fill
       actions={
         canConfigureKb ? (
-          <Button icon={<Settings size={15} />} onClick={openSettings}>
-            {t("knowledgeBases.settingsTitle")}
-          </Button>
+          <>
+            <Button
+              icon={<FlaskConical size={15} />}
+              disabled={!selected}
+              onClick={() => setRetrievalTestOpen(true)}
+            >
+              Retrieval test
+            </Button>
+            <Button icon={<Settings size={15} />} onClick={openSettings}>
+              {t("knowledgeBases.settingsTitle")}
+            </Button>
+          </>
         ) : undefined
       }
     >
+      {selected ? (
+        <DocumentChunksModal
+          open={chunksTarget !== null}
+          kbId={selected.id}
+          documentId={chunksTarget?.id ?? null}
+          filename={chunksTarget?.filename ?? ""}
+          canWrite={canWriteSelected}
+          onClose={() => setChunksTarget(null)}
+          onSaved={() => void loadDetail(selected.id)}
+        />
+      ) : null}
+      <RetrievalTestModal
+        open={retrievalTestOpen}
+        kbId={selected?.id ?? null}
+        kbName={selected?.name ?? ""}
+        onClose={() => setRetrievalTestOpen(false)}
+      />
       {loading ? (
         <div className={emptyLayoutClassName}>
           <div className={styles.centered}>
