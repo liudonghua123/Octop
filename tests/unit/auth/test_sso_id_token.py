@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 import httpx
@@ -30,8 +31,20 @@ def jwks_client(signing_key: rsa.RSAPrivateKey) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
+def _jwks_client_with_keys(jwks: dict) -> httpx.Client:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://issuer.example/jwks"
+        return httpx.Response(200, json=jwks)
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
 def _token(
-    signing_key: rsa.RSAPrivateKey, *, issuer: str = "https://issuer.example", nonce: str = "nonce"
+    signing_key: rsa.RSAPrivateKey,
+    *,
+    issuer: str = "https://issuer.example",
+    nonce: str = "nonce",
+    kid: str | None = "test-key",
 ) -> str:
     now = int(time.time())
     return jwt.encode(
@@ -45,7 +58,7 @@ def _token(
         },
         signing_key,
         algorithm="RS256",
-        headers={"kid": "test-key"},
+        headers={"kid": kid} if kid else {},
     )
 
 
@@ -131,4 +144,64 @@ def test_verify_id_token_rejects_disallowed_algorithm(
             client_id="octop-client",
             nonce="nonce",
             httpx=jwks_client,
+        )
+
+
+def test_verify_id_token_falls_back_to_single_key_without_kid(
+    signing_key: rsa.RSAPrivateKey, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Single-key IdPs (e.g. YNU) omit ``kid`` — must verify via the only key."""
+    jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(signing_key.public_key()))
+    jwk["use"] = "sig"  # no kid, no alg — mirrors the real YNU JWKS
+    client = _jwks_client_with_keys({"keys": [jwk]})
+    with caplog.at_level(logging.WARNING, logger="octop.infra.auth.sso.id_token"):
+        claims = verify_id_token(
+            _token(signing_key, kid=None),
+            jwks_uri="https://issuer.example/jwks",
+            issuer="https://issuer.example",
+            client_id="octop-client",
+            nonce="nonce",
+            httpx=client,
+        )
+    assert claims["sub"] == "user-1"
+    assert any("falling back" in r.message for r in caplog.records)
+
+
+def test_verify_id_token_still_rejects_missing_kid_with_multiple_keys(
+    signing_key: rsa.RSAPrivateKey,
+) -> None:
+    """No kid + multiple JWKS keys is ambiguous — must still fail loudly."""
+    other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwk_a = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(signing_key.public_key()))
+    jwk_b = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(other.public_key()))
+    for jwk in (jwk_a, jwk_b):
+        jwk["use"] = "sig"
+    client = _jwks_client_with_keys({"keys": [jwk_a, jwk_b]})
+    with pytest.raises(jwt.InvalidTokenError, match="missing a key ID"):
+        verify_id_token(
+            _token(signing_key, kid=None),
+            jwks_uri="https://issuer.example/jwks",
+            issuer="https://issuer.example",
+            client_id="octop-client",
+            nonce="nonce",
+            httpx=client,
+        )
+
+
+def test_verify_id_token_rejects_wrong_signature_in_kidless_fallback(
+    signing_key: rsa.RSAPrivateKey,
+) -> None:
+    """Fallback verifies the signature — a token from another key must fail."""
+    jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(signing_key.public_key()))
+    jwk["use"] = "sig"
+    client = _jwks_client_with_keys({"keys": [jwk]})
+    rogue = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    with pytest.raises(jwt.InvalidSignatureError):
+        verify_id_token(
+            _token(rogue, kid=None),
+            jwks_uri="https://issuer.example/jwks",
+            issuer="https://issuer.example",
+            client_id="octop-client",
+            nonce="nonce",
+            httpx=client,
         )
